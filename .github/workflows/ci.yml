@@ -62,10 +62,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build the image
         run: docker build -t agentpay:ci .
+      # ignore-unfixed: the Debian base always carries CVEs with no patch
+      # released yet — unactionable noise. Gate only on vulns a rebuild with
+      # updated packages would actually fix.
       - name: Scan the image — base OS + installed packages
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: agentpay:ci
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: "1"
