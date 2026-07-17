@@ -117,4 +117,18 @@ audit log — it only gets `request_payment` and a verdict.
 
 ## Status
 
-MVP in progress. Policy engine + audit + MCP server done; demo agent next.
+Working MVP: pure policy engine, per-agent policies, Bearer-key auth,
+append-only audit log, real Sepolia sends, stdio + hosted HTTP transports, and a
+LangChain demo agent. 46 tests.
+
+## Roadmap
+
+- **ERC-20 / stablecoin support (USDC).** Native ETH only today; stablecoins are
+  the real currency of agent payments. Adds token transfers + `approve()`
+  inspection (the vector behind most wallet drains).
+- **Postgres audit backend.** Replaces the SQLite file — unlocks multi-replica
+  deployment *and* cross-process budget atomicity (`SELECT … FOR UPDATE`),
+  lifting the single-process limitation above. One swap, both wins.
+- **Approval-completion flow.** A tool/queue to approve a `needs_approval`
+  payment and execute it (today it blocks with no resume path).
+- **Abuse limits.** Rate-limit denied attempts; paginate/retain the audit log.
