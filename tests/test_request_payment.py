@@ -191,6 +191,17 @@ def test_parallel_requests_cannot_bust_the_budget(tmp_path):
     assert total <= __import__("decimal").Decimal("0.10")
 
 
+# ---- observability -------------------------------------------------------------
+
+def test_decision_is_logged(tmp_path, caplog):
+    import logging
+    tools, _ = build(tmp_path)
+    with caplog.at_level(logging.INFO, logger="agentpay.payments"):
+        tools["request_payment"](RECIPIENT, 0.01, "data api")
+    line = caplog.text
+    assert "agent=agent-1" in line and "asset=ETH" in line and "allow" in line
+
+
 # ---- per-agent isolation -------------------------------------------------------
 
 def test_budgets_are_isolated_per_agent(tmp_path):

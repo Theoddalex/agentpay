@@ -22,10 +22,17 @@ Agent: "pay 50 USDC to 0xabc… for the data API"
    │                  list · rate limit · human-approval threshold        │
    └─────────────────────────────────────────────────────────────────────┘
         │ ALLOW → sign & send (testnet)      │ DENY → block + log
-        │ NEEDS_APPROVAL → wait for human    ▼
-        ▼                              agent gets a clear reason
-   tx executes, logged                every attempt is audited
+        │ NEEDS_APPROVAL → queue for human   ▼
+        ▼           │                  agent gets a clear reason
+   tx executes,     └─► operator approves → re-check limits → execute
+   logged                                   every attempt is audited
 ```
+
+Payments can move **ETH or ERC-20 tokens (USDC)**, and agents can `request_payment`
+or `request_approval` (a guarded token allowance — capped to an exact amount,
+never unlimited). A `needs_approval` verdict is no longer a dead end: it queues
+for a human operator, who approves or rejects it (`resolve_approval`) — and hard
+limits are re-checked at approval time, so a human "yes" can't bust a budget.
 
 The **MCP server is the product**; the LangChain agent in `examples/` is just
 one client. Any MCP-aware client (Claude Desktop, Cursor, another agent) can use
@@ -41,8 +48,8 @@ the same server.
   ceiling — and a token is payable only if the policy names it.
 - **The policy engine is pure logic** (`src/agentpay/services/policy.py`) — no
   I/O — so it is exhaustively unit-tested. The code guarding money is the code
-  under the most tests (60 across the engine, auth, audit, ERC-20, and payment
-  flow).
+  under the most tests (74 across the engine, auth, audit, ERC-20, approval
+  flow, and payment flow).
 - **Config, not code.** Limits live in `policy.yaml`.
 
 ## Layout
@@ -62,7 +69,7 @@ src/agentpay/
 │   └── wallet.py                # throwaway testnet key
 ├── schemas/schemas.py           # contracts (Decimal money, dataclasses)
 └── configs/base.py              # pydantic settings
-tests/                           # 60 tests — policy, auth, audit, ERC-20, payment flow
+tests/                           # 74 tests — policy, auth, audit, ERC-20, approvals, flow
 examples/demo_agent.py           # a LangChain agent that uses the server
 ```
 
@@ -111,6 +118,12 @@ The API key is the agent's identity: it selects that agent's policy section in
 for `support-bot` (0.01/tx cap) and allowed for `procurement` (0.05/tx) —
 identity decides. Unauthenticated requests get a 401 before any tool runs.
 
+To use the approval-completion flow in hosted mode, also set
+`AGENTPAY_ADMIN_KEYS='sk-admin-…:ops'` — a human operator with an admin key can
+`list_pending_approvals` and `resolve_approval`; agents (regular keys) cannot,
+so no agent can sign off its own `needs_approval` payment. Over stdio the local
+operator is the admin automatically.
+
 Either way, the client's agent code never sees the policy, the keys, or the
 audit log — it only gets `request_payment` and a verdict.
 
@@ -123,19 +136,15 @@ audit log — it only gets `request_payment` and a verdict.
 
 ## Status
 
-Working MVP: pure policy engine, per-agent policies, per-asset limits, Bearer-key
-auth, append-only audit log, real Base Sepolia sends of **ETH and USDC**, stdio +
-hosted HTTP transports, and a LangChain demo agent. 60 tests.
+Working v1: pure policy engine, per-agent + per-asset policies, guarded token
+`approve()`, a human approval-completion flow (admin-gated, budget re-checked at
+approval time), Bearer-key auth, append-only audit log, structured logging, real
+Base Sepolia sends of **ETH and USDC**, stdio + hosted HTTP transports, and a
+LangChain demo agent. 74 tests.
 
 ## Roadmap
 
-- **Guarded `approve()`.** Token *transfers* ship today; the next ERC-20 step is
-  a guarded `approve` that caps allowance to the exact amount and refuses
-  unlimited (`2^256-1`) approvals — the vector behind most wallet drains. (The
-  current transfer path grants no allowance, so it sidesteps this entirely.)
 - **Postgres audit backend.** Replaces the SQLite file — unlocks multi-replica
   deployment *and* cross-process budget atomicity (`SELECT … FOR UPDATE`),
   lifting the single-process limitation above. One swap, both wins.
-- **Approval-completion flow.** A tool/queue to approve a `needs_approval`
-  payment and execute it (today it blocks with no resume path).
 - **Abuse limits.** Rate-limit denied attempts; paginate/retain the audit log.

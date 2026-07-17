@@ -26,10 +26,11 @@ class PaymentRequest:
     """What an agent asks to do. Immutable — the engine never mutates the ask."""
 
     agent_id: str
-    recipient: str          # 0x… address
+    recipient: str          # 0x… address (the payee, or the spender for an approval)
     amount: Decimal         # in whole units of `asset` (e.g. 0.05 ETH, 50 USDC)
     reason: str = ""        # free-text: what the payment is for (for the audit log)
     asset: str = "ETH"      # "ETH" (native) or a token symbol, e.g. "USDC"
+    operation: str = "transfer"  # "transfer" (move funds) or "approve" (grant allowance)
 
 
 @dataclass(frozen=True)

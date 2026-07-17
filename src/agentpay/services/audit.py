@@ -12,10 +12,14 @@ failure), which is why each row carries a `status`:
                 (covers deny, needs_approval, and allow-with-sends-off)
     executed  - the transfer was broadcast; tx_hash is set
     failed    - the transfer was attempted and raised; no funds moved
+    rejected  - a needs_approval row a human declined (or a hard limit blocked
+                at approval time); no funds moved
 
-Budget accounting (`approved_spends`) counts only decision='allow' rows that did
-NOT fail — so needs_approval never consumes budget, and a failed send doesn't
-either.
+When a human approves a pending row, its decision is rewritten allow (the human
+converted needs_approval -> allow) and status becomes executed/failed. Budget
+accounting (`approved_spends`) counts only decision='allow' rows that did NOT
+fail — so a still-pending or rejected approval never consumes budget, an
+approved+executed one does, and a failed send never does.
 """
 
 from __future__ import annotations
@@ -46,22 +50,31 @@ class AuditLog:
                     recipient  TEXT    NOT NULL,
                     amount     TEXT    NOT NULL,   -- Decimal as text: exact precision
                     asset      TEXT    NOT NULL DEFAULT 'ETH',  -- ETH or token symbol
+                    operation  TEXT    NOT NULL DEFAULT 'transfer',  -- transfer/approve
                     reason     TEXT,
                     decision   TEXT    NOT NULL,   -- allow / deny / needs_approval
                     rule       TEXT    NOT NULL,
                     detail     TEXT,
-                    status     TEXT    NOT NULL DEFAULT 'recorded',  -- recorded/executed/failed
+                    status     TEXT    NOT NULL DEFAULT 'recorded',  -- see status vocab below
                     tx_hash    TEXT,
-                    error      TEXT
+                    error      TEXT,
+                    approver   TEXT             -- who resolved a needs_approval row
                 )
                 """
             )
-            # Migrate pre-asset databases: add the column if an older file lacks it.
+            # Migrate older databases: add any columns a pre-existing file lacks.
             existing = {r[1] for r in self._conn.execute("PRAGMA table_info(audit)")}
             if "asset" not in existing:
                 self._conn.execute(
                     "ALTER TABLE audit ADD COLUMN asset TEXT NOT NULL DEFAULT 'ETH'"
                 )
+            if "operation" not in existing:
+                self._conn.execute(
+                    "ALTER TABLE audit ADD COLUMN operation TEXT NOT NULL "
+                    "DEFAULT 'transfer'"
+                )
+            if "approver" not in existing:
+                self._conn.execute("ALTER TABLE audit ADD COLUMN approver TEXT")
             # budget queries filter by agent + recency; index makes them O(log n).
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_agent_ts ON audit (agent_id, ts)"
@@ -79,15 +92,16 @@ class AuditLog:
         """Insert an attempt and return its row id (used to stamp the outcome later)."""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO audit (ts, agent_id, recipient, amount, asset, reason, "
-                "decision, rule, detail, status, tx_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit (ts, agent_id, recipient, amount, asset, operation, "
+                "reason, decision, rule, detail, status, tx_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     now.isoformat(),
                     request.agent_id,
                     request.recipient,
                     str(request.amount),
                     request.asset,
+                    request.operation,
                     request.reason,
                     decision.decision.value,
                     decision.rule,
@@ -115,10 +129,63 @@ class AuditLog:
             )
             self._conn.commit()
 
+    # --- approval-completion flow ---------------------------------------------
+
+    def pending_approvals(self, agent_id: str | None = None) -> list[dict]:
+        """needs_approval rows still awaiting a human decision (status=recorded)."""
+        cols = ["id", "ts", "agent_id", "recipient", "amount", "asset",
+                "operation", "detail"]
+        sql = (f"SELECT {', '.join(cols)} FROM audit "
+               "WHERE decision = 'needs_approval' AND status = 'recorded'")
+        params: list = []
+        if agent_id:
+            sql += " AND agent_id = ?"
+            params.append(agent_id)
+        sql += " ORDER BY id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+    def get_pending(self, row_id: int) -> dict | None:
+        """Fetch one still-pending approval by id, or None if it isn't pending."""
+        cols = ["id", "agent_id", "recipient", "amount", "asset", "operation", "reason"]
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {', '.join(cols)} FROM audit "
+                "WHERE id = ? AND decision = 'needs_approval' AND status = 'recorded'",
+                (row_id,),
+            ).fetchone()
+        return dict(zip(cols, row)) if row else None
+
+    def mark_approved(self, row_id: int, approver: str) -> None:
+        """A human approved: rewrite needs_approval -> allow and stamp the approver.
+
+        Status stays 'recorded'; the caller then stamps the send outcome with the
+        existing mark_executed/mark_failed. Once decision='allow' the row counts
+        toward the budget (even before a send, mirroring allow-with-sends-off).
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE audit SET decision = 'allow', approver = ? WHERE id = ?",
+                (approver, row_id),
+            )
+            self._conn.commit()
+
+    def mark_rejected(self, row_id: int, approver: str, note: str = "") -> None:
+        """A human declined (or a hard limit blocked at approval time)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE audit SET status = 'rejected', approver = ?, error = ? "
+                "WHERE id = ?",
+                (approver, note or None, row_id),
+            )
+            self._conn.commit()
+
     def history(self, agent_id: str | None = None) -> list[dict]:
         """Return audit rows, optionally filtered to one agent, oldest first."""
-        cols = ["ts", "agent_id", "recipient", "amount", "asset", "decision", "rule",
-                "detail", "status", "tx_hash", "error"]
+        cols = ["ts", "agent_id", "recipient", "amount", "asset", "operation",
+                "decision", "rule", "detail", "status", "tx_hash", "error",
+                "approver"]
         select = f"SELECT {', '.join(cols)} FROM audit"
         with self._lock:
             if agent_id:

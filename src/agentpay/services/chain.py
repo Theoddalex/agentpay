@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-# Minimal ERC-20 ABI — only the three methods agentpay touches. We deliberately
-# do NOT include approve(): the transfer() flow moves funds directly and never
-# grants an allowance, so the unlimited-approval drain vector simply doesn't
-# exist on this path. A guarded approve() is a separate, later feature.
+# Minimal ERC-20 ABI — only the methods agentpay touches. approve() is included
+# for the GUARDED approval path: agentpay only ever approves an exact, finite
+# amount (never the unlimited 2**256-1 allowance that is behind most token
+# drains), and only after the policy engine clears it.
 _ERC20_ABI = [
     {
         "constant": True,
@@ -34,6 +34,16 @@ _ERC20_ABI = [
         "type": "function",
     },
     {
+        "constant": False,
+        "inputs": [
+            {"name": "_spender", "type": "address"},
+            {"name": "_value", "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"name": "success", "type": "bool"}],
+        "type": "function",
+    },
+    {
         "constant": True,
         "inputs": [],
         "name": "decimals",
@@ -41,6 +51,11 @@ _ERC20_ABI = [
         "type": "function",
     },
 ]
+
+# An ERC-20 allowance at or near this is effectively "unlimited" — the pattern
+# behind most wallet drains. agentpay must never sign one; the policy per-tx cap
+# already blocks large amounts, this is the last-line structural refusal.
+_UINT256_MAX = 2**256 - 1
 
 
 def _to_base_units(amount: Decimal, decimals: int) -> int:
@@ -115,6 +130,44 @@ class Chain:
             "maxPriorityFeePerGas": priority_fee,
             "chainId": self.chain_id,
         }
+        signed = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        return tx_hash.hex()
+
+    def approve_erc20(
+        self, token_address: str, spender: str, amount: Decimal, decimals: int
+    ) -> str:
+        """Grant `spender` an allowance of exactly `amount` tokens. Returns the tx hash.
+
+        This is the guarded approval: the amount is an exact, finite value (in
+        whole token units) — never the unlimited allowance. If the computed base
+        amount ever reached the uint256 ceiling we refuse to sign, as a last-line
+        structural guard on top of the policy per-transaction cap.
+
+        Precondition: caller has already cleared this with the policy engine.
+        """
+        if self.account is None:
+            raise RuntimeError("no account loaded; cannot approve")
+
+        value = _to_base_units(amount, decimals)
+        if value >= _UINT256_MAX:
+            raise ValueError("refusing to sign an unlimited (uint256-max) allowance")
+
+        contract = self.w3.eth.contract(
+            address=self.w3.to_checksum_address(token_address), abi=_ERC20_ABI
+        )
+        max_fee, priority_fee = self._fees()
+        tx = contract.functions.approve(
+            self.w3.to_checksum_address(spender), value
+        ).build_transaction(
+            {
+                "from": self.account.address,
+                "nonce": self.w3.eth.get_transaction_count(self.account.address),
+                "maxFeePerGas": max_fee,
+                "maxPriorityFeePerGas": priority_fee,
+                "chainId": self.chain_id,
+            }
+        )
         signed = self.account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         return tx_hash.hex()

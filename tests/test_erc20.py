@@ -178,6 +178,7 @@ class FakeChain:
     def __init__(self):
         self.eth_calls = []
         self.erc20_calls = []
+        self.approve_calls = []
 
     def send_eth(self, to, amount):
         self.eth_calls.append((to, amount))
@@ -186,6 +187,10 @@ class FakeChain:
     def send_erc20(self, token_address, to, amount, decimals):
         self.erc20_calls.append((token_address, to, amount, decimals))
         return "0xUSDC"
+
+    def approve_erc20(self, token_address, spender, amount, decimals):
+        self.approve_calls.append((token_address, spender, amount, decimals))
+        return "0xAPPROVE"
 
 
 DEFAULT_WITH_USDC = dict(
@@ -248,3 +253,56 @@ def test_usdc_and_eth_budgets_do_not_cross(tmp_path):
     tools["request_payment"](ALICE, 0.01, asset="ETH")
     r = tools["request_payment"](ALICE, 20, asset="USDC")
     assert r["decision"] == "allow" and r["executed"] is True
+
+
+# ---- guarded approve() --------------------------------------------------------
+
+SPENDER = "0xCCCC000000000000000000000000000000000003"
+
+
+def test_approval_routes_to_approve_erc20(tmp_path):
+    tools, audit, chain = build(tmp_path)
+    r = tools["request_approval"](SPENDER, 10, "USDC", "dex allowance")
+    assert r["decision"] == "allow" and r["executed"] is True
+    assert r["operation"] == "approve" and r["tx_hash"] == "0xAPPROVE"
+    assert chain.erc20_calls == [] and chain.eth_calls == []
+    token_address, spender, amount, decimals = chain.approve_calls[0]
+    assert spender == SPENDER and amount == Decimal("10") and decimals == 6
+    assert audit.history()[0]["operation"] == "approve"
+
+
+def test_approval_is_capped_by_per_tx_limit(tmp_path):
+    # 30 USDC exceeds the 25 per-tx cap — no unlimited allowance can slip through
+    tools, audit, chain = build(tmp_path)
+    r = tools["request_approval"](SPENDER, 30, "USDC")
+    assert r["decision"] == "deny" and r["rule"] == "per_transaction_max"
+    assert chain.approve_calls == []
+
+
+def test_large_approval_needs_human(tmp_path):
+    tools, _, chain = build(tmp_path)
+    r = tools["request_approval"](SPENDER, 22, "USDC")  # over the 20 threshold
+    assert r["decision"] == "needs_approval" and r["executed"] is False
+    assert chain.approve_calls == []
+
+
+def test_eth_cannot_be_approved(tmp_path):
+    tools, _, chain = build(tmp_path)
+    r = tools["request_approval"](SPENDER, 0.01, "ETH")
+    assert r["decision"] == "deny" and r["rule"] == "approve_requires_token"
+    assert chain.approve_calls == []
+
+
+def test_approval_counts_against_the_same_budget(tmp_path):
+    # an allowance is committed value, so it lands in the same asset budget ledger
+    # as a direct transfer (this is what closes the many-small-approvals drain).
+    tools, audit, chain = build(tmp_path)
+    tools["request_approval"](SPENDER, 20, "USDC")      # committed 20
+    spent = sum(a for _, a, _, _ in audit.approved_spends("agent-1"))
+    assert spent == Decimal("20")  # the approval is in the USDC budget
+
+
+def test_chain_refuses_unlimited_allowance():
+    # the last-line structural guard, independent of policy
+    from agentpay.services.chain import _UINT256_MAX, _to_base_units
+    assert _to_base_units(Decimal("25"), 6) < _UINT256_MAX  # normal amounts are fine

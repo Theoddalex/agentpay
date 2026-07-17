@@ -17,6 +17,12 @@ from contextvars import ContextVar
 # Identity of the caller for the current request. Default for stdio/local use.
 current_agent_id: ContextVar[str] = ContextVar("current_agent_id", default="local")
 
+# Whether the caller may resolve pending approvals. Admins are humans (operators),
+# never agents — an agent must not be able to sign off its own needs_approval
+# payment. Over HTTP this is granted by a separate admin key; over stdio the
+# local operator owns the box, so it defaults on there (see main.py).
+current_is_admin: ContextVar[bool] = ContextVar("current_is_admin", default=False)
+
 
 def parse_api_keys(raw: str) -> dict[str, str]:
     """Parse "key1:agent-a,key2:agent-b" into {key: agent_id}."""
@@ -44,9 +50,11 @@ class AuthMiddleware:
     contextvar for the tools to read.
     """
 
-    def __init__(self, app, api_keys: dict[str, str]) -> None:
+    def __init__(self, app, api_keys: dict[str, str],
+                 admin_keys: dict[str, str] | None = None) -> None:
         self.app = app
         self.api_keys = api_keys
+        self.admin_keys = admin_keys or {}
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -55,9 +63,9 @@ class AuthMiddleware:
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         auth = headers.get("authorization", "")
         token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
-        agent_id = self._resolve(token)
+        resolved = self._resolve(token)
 
-        if agent_id is None:
+        if resolved is None:
             await send(
                 {
                     "type": "http.response.start",
@@ -76,19 +84,26 @@ class AuthMiddleware:
             )
             return
 
+        agent_id, is_admin = resolved
         current_agent_id.set(agent_id)
+        current_is_admin.set(is_admin)
         await self.app(scope, receive, send)
 
-    def _resolve(self, token: str) -> str | None:
-        """Return the agent_id for a token, comparing in constant time.
+    def _resolve(self, token: str) -> tuple[str, bool] | None:
+        """Return (identity, is_admin) for a token, comparing in constant time.
 
-        A plain dict lookup leaks key length/prefix via timing; compare_digest
-        against each known key does not. The key set is small, so O(n) is fine.
+        Admin keys are checked as well as agent keys; a token matching an admin
+        key yields is_admin=True. A plain dict lookup leaks key length/prefix via
+        timing; compare_digest against each known key does not. The key set is
+        small, so O(n) is fine.
         """
         if not token:
             return None
-        match = None
+        match: tuple[str, bool] | None = None
+        for key, admin_id in self.admin_keys.items():
+            if hmac.compare_digest(key, token):
+                match = (admin_id, True)
         for key, agent_id in self.api_keys.items():
             if hmac.compare_digest(key, token):
-                match = agent_id
+                match = (agent_id, False)
         return match
