@@ -1,5 +1,7 @@
 # agentpay
 
+[![ci](https://github.com/theoddalex/agentpay/actions/workflows/ci.yml/badge.svg)](https://github.com/theoddalex/agentpay/actions/workflows/ci.yml)
+
 **Programmable spend limits and audit trails so AI agents can pay for things
 without risking the wallet.**
 
