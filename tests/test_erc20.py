@@ -179,6 +179,7 @@ class FakeChain:
         self.eth_calls = []
         self.erc20_calls = []
         self.approve_calls = []
+        self.token_balance_calls = []
 
     def send_eth(self, to, amount):
         self.eth_calls.append((to, amount))
@@ -191,6 +192,15 @@ class FakeChain:
     def approve_erc20(self, token_address, spender, amount, decimals):
         self.approve_calls.append((token_address, spender, amount, decimals))
         return "0xAPPROVE"
+
+    def get_token_balance(self, token_address, address, decimals):
+        self.token_balance_calls.append((token_address, address, decimals))
+        return Decimal("42")
+
+
+def token_addr():
+    from agentpay.services.tokens import token_for
+    return token_for(BASE_SEPOLIA, "USDC").address
 
 
 DEFAULT_WITH_USDC = dict(
@@ -245,6 +255,36 @@ def test_token_unknown_on_this_network_is_rejected(tmp_path):
     r = tools["request_payment"](ALICE, 10, asset="USDC")
     assert r["decision"] == "deny" and r["rule"] == "asset_unknown"
     assert chain.erc20_calls == [] and chain.eth_calls == []
+
+
+def test_over_precision_usdc_rejected_at_the_boundary(tmp_path):
+    # 7 decimals against 6-decimal USDC — must deny up front, never reach chain,
+    # so a recorded ALLOW is always executable.
+    tools, audit, chain = build(tmp_path)
+    r = tools["request_payment"](ALICE, 0.0000001, "dust", "USDC")
+    assert r["decision"] == "deny" and r["rule"] == "amount_precision"
+    assert chain.erc20_calls == []
+    assert audit.history()[0]["decision"] == "deny"  # recorded as a clean deny
+
+
+def test_lowercase_asset_symbol_is_normalized(tmp_path):
+    tools, _, chain = build(tmp_path)
+    r = tools["request_payment"](ALICE, 2, "lower", asset="usdc")
+    assert r["decision"] == "allow" and r["asset"] == "USDC"
+    assert len(chain.erc20_calls) == 1
+
+
+def test_get_balance_routes_token_to_get_token_balance(tmp_path):
+    tools, _, chain = build(tmp_path)
+    r = tools["get_balance"](ALICE, asset="USDC")
+    assert r["asset"] == "USDC"
+    assert chain.token_balance_calls[0][0] == token_addr()  # resolved USDC address
+
+
+def test_get_balance_unknown_token_errors(tmp_path):
+    tools, _, chain = build(tmp_path)
+    r = tools["get_balance"](ALICE, asset="DAI")
+    assert "error" in r and "known token" in r["error"]
 
 
 def test_usdc_and_eth_budgets_do_not_cross(tmp_path):

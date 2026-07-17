@@ -140,11 +140,44 @@ Working v1: pure policy engine, per-agent + per-asset policies, guarded token
 `approve()`, a human approval-completion flow (admin-gated, budget re-checked at
 approval time), Bearer-key auth, append-only audit log, structured logging, real
 Base Sepolia sends of **ETH and USDC**, stdio + hosted HTTP transports, and a
-LangChain demo agent. 74 tests.
+LangChain demo agent. 86 tests.
+
+## Known limitations (testnet-first — read before mainnet)
+
+These are deliberate boundaries of the current design, verified by a `/ship`
+review. None risks testnet funds; all are gated before real money.
+
+- **Allowances are budgeted per rolling window, not as a standing liability.**
+  A guarded `approve()` counts against the same 24h budget as a transfer, but an
+  ERC-20 allowance is a *standing* on-chain grant that outlives the window — so
+  across days an agent could accumulate live allowances beyond any single-window
+  cap. Today: only grant approvals to spenders you trust, and prefer transfers.
+  **Hard gate before mainnet** (see roadmap: allowance ledger).
+- **Rate limiting counts only allowed spends.** Denied and `needs_approval`
+  attempts don't count toward `rate_limit_per_minute`, and the pending-approval
+  queue is unbounded/unpaginated — a looping agent can flood the audit log.
+- **Single wallet, single process.** All agents sign from one keystore; the
+  per-agent lock prevents double-spend within one process, but concurrent
+  in-flight txs can race on the nonce, and multiple workers/replicas against one
+  `audit.db` are not safe. Run one replica per wallet.
+- **stdio makes the caller its own approver.** The "an agent can't approve its
+  own payment" guarantee holds over HTTP (separate admin keys); over stdio the
+  local operator is both. Hard limits are still re-checked at approval time.
+- **Address validation is hex-shape only** (no EIP-55 checksum) — a mistyped but
+  well-formed address will send. Use the allowlist for known recipients.
+
+> **Hosted-mode operational notes.** Bearer keys travel in headers — terminate
+> TLS at your ingress/reverse proxy; never expose the plain HTTP port publicly.
+> Keep `AGENTPAY_API_KEYS` and `AGENTPAY_ADMIN_KEYS` disjoint (the server refuses
+> to start otherwise). See the single-process limitation above.
 
 ## Roadmap
 
+- **Allowance ledger (mainnet gate).** Track outstanding ERC-20 allowances as a
+  first-class, non-expiring liability with its own cap (per asset+spender,
+  net-new delta on re-approve) — closes the cross-window accumulation above.
 - **Postgres audit backend.** Replaces the SQLite file — unlocks multi-replica
   deployment *and* cross-process budget atomicity (`SELECT … FOR UPDATE`),
   lifting the single-process limitation above. One swap, both wins.
-- **Abuse limits.** Rate-limit denied attempts; paginate/retain the audit log.
+- **Abuse limits.** Count all attempts toward the rate limit; bound, paginate,
+  and expire the pending-approval queue; retain/rotate the audit log.

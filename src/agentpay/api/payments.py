@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation
 from agentpay.schemas.schemas import Decision, PaymentRequest, SpendRecord
 from agentpay.services.audit import AuditLog
 from agentpay.services.auth import current_agent_id, current_is_admin
+from agentpay.services.chain import _to_base_units
 from agentpay.services.policy import PolicyEngine, PolicyStore
 from agentpay.services.tokens import token_for
 
@@ -129,6 +130,16 @@ def register_payment_tools(
                                operation,
                                f"asset {asset} is not a known token on this network",
                                "asset_unknown")
+            # Reject sub-token-precision amounts at the boundary, not at broadcast:
+            # a recorded ALLOW must always be executable (else it fails only when
+            # an operator has already approved it — see _to_base_units).
+            try:
+                _to_base_units(amt, token.decimals)
+            except ValueError:
+                return _reject(audit, agent_id, recipient, amount, reason, now, asset,
+                               operation,
+                               f"amount {amt} exceeds {asset}'s {token.decimals} decimals",
+                               "amount_precision")
         elif operation == "approve":
             # Native ETH has no allowance concept — approve() is ERC-20 only.
             return _reject(audit, agent_id, recipient, amount, reason, now, asset,
@@ -308,7 +319,17 @@ def register_payment_tools(
                     audit.mark_executed(payment_id, tx_hash)
                 except Exception as e:  # noqa: BLE001 - record every outcome
                     error = str(e)
-                    audit.mark_failed(payment_id, error)
+                    # Don't burn the operator's decision on a transient failure:
+                    # roll back to pending so it can be re-resolved.
+                    audit.revert_to_pending(payment_id, error)
+
+        if error:
+            log.warning("approval id=%s send failed, back to pending: %s",
+                        payment_id, error)
+            return {"resolved": False, "executed": False,
+                    "decision": "needs_approval",
+                    "detail": f"send failed, still pending: {error}",
+                    "error": error, "payment_id": payment_id}
 
         log.info("approval id=%s approved by=%s agent=%s executed=%s tx=%s",
                  payment_id, approver, agent_id, executed, tx_hash)

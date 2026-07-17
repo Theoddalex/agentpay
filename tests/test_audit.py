@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -61,6 +62,58 @@ def test_since_filter_bounds_the_window(tmp_path):
     audit.record(req("0.02"), ALLOW, now)                        # recent
     recent = audit.approved_spends("agent-1", since=now - timedelta(hours=24))
     assert [a for _, a, _, _ in recent] == [Decimal("0.02")]
+
+
+def _make_legacy_db(path):
+    """A pre-ERC-20 audit table: no asset / operation / approver columns."""
+    c = sqlite3.connect(path)
+    c.execute(
+        """CREATE TABLE audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+            agent_id TEXT NOT NULL, recipient TEXT NOT NULL, amount TEXT NOT NULL,
+            reason TEXT, decision TEXT NOT NULL, rule TEXT NOT NULL, detail TEXT,
+            status TEXT NOT NULL DEFAULT 'recorded', tx_hash TEXT, error TEXT
+        )"""
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    c.execute(
+        "INSERT INTO audit (ts, agent_id, recipient, amount, reason, decision, "
+        "rule, detail, status) VALUES (?,?,?,?,?,?,?,?,?)",
+        (now, "agent-1", "0x" + "a" * 40, "0.01", "legacy", "allow", "ok",
+         "within", "recorded"),
+    )
+    c.commit()
+    c.close()
+
+
+def test_opening_a_legacy_db_adds_missing_columns(tmp_path):
+    p = str(tmp_path / "legacy.db")
+    _make_legacy_db(p)
+    AuditLog(p)  # migration runs on open
+    cols = {r[1] for r in sqlite3.connect(p).execute("PRAGMA table_info(audit)")}
+    assert {"asset", "operation", "approver"} <= cols
+
+
+def test_legacy_rows_read_back_with_defaults(tmp_path):
+    p = str(tmp_path / "legacy.db")
+    _make_legacy_db(p)
+    audit = AuditLog(p)
+    # the pre-existing allow row still surfaces, defaulted, not NULL/crashed
+    (recipient, amount, _, asset) = audit.approved_spends("agent-1")[0]
+    assert amount == Decimal("0.01") and asset == "ETH"
+    row = audit.history("agent-1")[0]
+    assert row["asset"] == "ETH" and row["operation"] == "transfer"
+
+
+def test_reopening_a_migrated_db_is_idempotent(tmp_path):
+    p = str(tmp_path / "legacy.db")
+    _make_legacy_db(p)
+    AuditLog(p)
+    AuditLog(p)  # second open must not re-ADD columns or raise
+    now = datetime.now(timezone.utc)
+    audit = AuditLog(p)
+    audit.record(req("0.02"), ALLOW, now)  # still writable
+    assert len(audit.history("agent-1")) == 2
 
 
 def test_usable_from_a_worker_thread(tmp_path):

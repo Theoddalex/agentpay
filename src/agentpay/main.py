@@ -44,6 +44,15 @@ def main() -> None:
     # --- hosted mode ---
     api_keys = parse_api_keys(settings.agentpay_api_keys)
     admin_keys = parse_api_keys(settings.agentpay_admin_keys)
+
+    overlap = set(api_keys) & set(admin_keys)
+    if overlap:
+        sys.exit(
+            "agentpay: the same key appears in both AGENTPAY_API_KEYS and "
+            "AGENTPAY_ADMIN_KEYS. Keys must be disjoint — a shared key resolves to "
+            "the non-admin agent identity, silently stripping approval rights. "
+            "Give operators their own keys."
+        )
     if not api_keys and not settings.allow_anonymous:
         sys.exit(
             "agentpay: refusing to serve HTTP without authentication.\n"

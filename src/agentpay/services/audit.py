@@ -171,6 +171,22 @@ class AuditLog:
             )
             self._conn.commit()
 
+    def revert_to_pending(self, row_id: int, error: str) -> None:
+        """Undo a failed approval attempt so an operator can retry.
+
+        A resolved approval flips the row to allow BEFORE the send (record before
+        act). If the send then raises, we roll the row back to needs_approval /
+        recorded — otherwise get_pending would never see it again and the human's
+        decision would be lost to a transient RPC blip. The last error is kept.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE audit SET decision = 'needs_approval', status = 'recorded', "
+                "approver = NULL, error = ? WHERE id = ?",
+                (error, row_id),
+            )
+            self._conn.commit()
+
     def mark_rejected(self, row_id: int, approver: str, note: str = "") -> None:
         """A human declined (or a hard limit blocked at approval time)."""
         with self._lock:
