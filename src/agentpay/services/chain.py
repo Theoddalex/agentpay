@@ -41,13 +41,17 @@ class Chain:
             raise RuntimeError("no account loaded; cannot send")
 
         to_checksum = self.w3.to_checksum_address(to)
+        max_fee = self.w3.eth.gas_price * 2
+        # priority fee must never exceed max fee (invalid tx when base fee is
+        # tiny, e.g. on quiet testnets); clamp it.
+        priority_fee = min(self.w3.to_wei(1, "gwei"), max_fee)
         tx = {
             "to": to_checksum,
             "value": self.w3.to_wei(amount_eth, "ether"),
             "nonce": self.w3.eth.get_transaction_count(self.account.address),
             "gas": 21_000,
-            "maxFeePerGas": self.w3.eth.gas_price * 2,
-            "maxPriorityFeePerGas": self.w3.to_wei(1, "gwei"),
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority_fee,
             "chainId": self.chain_id,
         }
         signed = self.account.sign_transaction(tx)

@@ -38,6 +38,14 @@ def main() -> None:
     mcp.settings.host = settings.host
     mcp.settings.port = settings.port
 
+    # Stateless HTTP: each request spawns its server task from the REQUEST's
+    # async context. That is what lets AuthMiddleware's per-request identity
+    # contextvar propagate into the tool — in stateful mode the tool runs in a
+    # long-lived session task that captured identity once at session creation,
+    # so a per-request Bearer key would be ignored (the identity bug we fixed).
+    mcp.settings.stateless_http = True
+    mcp.settings.json_response = True
+
     if api_keys:
         # Wrap the MCP ASGI app so unauthenticated requests die at the door.
         import uvicorn

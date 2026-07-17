@@ -5,19 +5,27 @@ thin: it gathers inputs, delegates to the services (policy / audit / chain), and
 returns a plain dict. All the money-guarding logic lives in the policy engine,
 NOT here.
 
-The star is `request_payment`: it runs the policy check, records the attempt,
-and only executes the transfer if the policy said ALLOW *and* sends are enabled.
+The star is `request_payment`. Its critical section — read history, evaluate,
+record, send — runs under a per-agent lock so two concurrent requests can't both
+pass the same budget check (check-then-act must be atomic). The attempt is
+recorded BEFORE the send, then stamped executed/failed, so money can never move
+without a corresponding audit row.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from decimal import Decimal
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
-from agentpay.schemas.schemas import Decision, PaymentRequest
+from agentpay.schemas.schemas import Decision, PaymentRequest, SpendRecord
 from agentpay.services.audit import AuditLog
 from agentpay.services.auth import current_agent_id
 from agentpay.services.policy import PolicyEngine, PolicyStore
+
+# widest policy window is daily; only the last 24h can affect a decision.
+_BUDGET_WINDOW = timedelta(hours=24)
 
 
 def _now() -> datetime:
@@ -37,6 +45,11 @@ def register_payment_tools(
     server can run for policy demos without web3/an RPC configured.
     """
 
+    # One lock per agent: serialises each agent's read-check-record-send cycle
+    # without blocking unrelated agents. (Single-process assumption — see README;
+    # multi-worker deployments need a DB-level lock, not yet supported.)
+    _locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
     @mcp.tool()
     def request_payment(recipient: str, amount: float, reason: str = "") -> dict:
         """Request to pay some ETH to an address. The spend policy decides whether
@@ -52,31 +65,51 @@ def register_payment_tools(
         # configured local identity over stdio) — never from the agent's input,
         # which could simply lie about who it is.
         agent_id = current_agent_id.get()
-        request = PaymentRequest(
-            agent_id=agent_id,
-            recipient=recipient,
-            amount=Decimal(str(amount)),
-            reason=reason,
-        )
         now = _now()
 
-        # 1. Reconstruct THIS agent's spend history and apply THIS agent's policy.
-        history = [
-            _spend_record(r, a, t)
-            for (r, a, t) in audit.approved_spends(agent_id)
-        ]
-        engine = PolicyEngine(store.for_agent(agent_id))
-        decision = engine.evaluate(request, history, now)
+        # Validate the amount at the boundary: reject NaN/Infinity before it can
+        # reach (and crash) the policy engine's comparisons.
+        try:
+            amt = Decimal(str(amount))
+            if not amt.is_finite():
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            return _reject(audit, agent_id, recipient, amount, reason, now,
+                           "amount must be a finite number", "amount_finite")
 
-        # 2. Execute only if allowed outright AND sends are enabled.
-        tx_hash = None
-        executed = False
-        if decision.decision is Decision.ALLOW and enable_sends and get_chain:
-            tx_hash = get_chain().send_eth(request.recipient, request.amount)
-            executed = True
+        request = PaymentRequest(agent_id=agent_id, recipient=recipient,
+                                 amount=amt, reason=reason)
 
-        # 3. Always record the attempt.
-        audit.record(request, decision, now, tx_hash=tx_hash)
+        # Validate recipient format before we ever return ALLOW.
+        if not _looks_like_address(recipient):
+            return _reject(audit, agent_id, recipient, amount, reason, now,
+                           f"recipient {recipient!r} is not a valid address",
+                           "recipient_format")
+
+        with _locks[agent_id]:
+            # 1. THIS agent's recent spends (bounded to the budget window) + policy.
+            history = [
+                SpendRecord(recipient=r, amount=a, timestamp=t)
+                for (r, a, t) in audit.approved_spends(agent_id, since=now - _BUDGET_WINDOW)
+            ]
+            engine = PolicyEngine(store.for_agent(agent_id))
+            decision = engine.evaluate(request, history, now)
+
+            # 2. Record the attempt BEFORE any send, so nothing goes unlogged.
+            row_id = audit.record(request, decision, now)
+
+            # 3. Execute only on outright ALLOW with sends enabled.
+            tx_hash = None
+            executed = False
+            error = None
+            if decision.decision is Decision.ALLOW and enable_sends and get_chain:
+                try:
+                    tx_hash = get_chain().send_eth(request.recipient, request.amount)
+                    executed = True
+                    audit.mark_executed(row_id, tx_hash)
+                except Exception as e:  # noqa: BLE001 - record every outcome
+                    error = str(e)
+                    audit.mark_failed(row_id, error)
 
         return {
             "decision": decision.decision.value,
@@ -85,6 +118,7 @@ def register_payment_tools(
             "detail": decision.reason,
             "executed": executed,
             "tx_hash": tx_hash,
+            "error": error,
         }
 
     @mcp.tool()
@@ -108,7 +142,30 @@ def register_payment_tools(
         return {"entries": audit.history(current_agent_id.get())}
 
 
-def _spend_record(recipient: str, amount: Decimal, ts: datetime):
-    from agentpay.schemas.schemas import SpendRecord
+def _looks_like_address(addr: str) -> bool:
+    """Cheap 0x + 40-hex check (avoids importing web3 for validation)."""
+    if not isinstance(addr, str) or not addr.startswith("0x") or len(addr) != 42:
+        return False
+    try:
+        int(addr, 16)
+        return True
+    except ValueError:
+        return False
 
-    return SpendRecord(recipient=recipient, amount=amount, timestamp=ts)
+
+def _reject(audit, agent_id, recipient, amount, reason, now, detail, rule) -> dict:
+    """Record a boundary-level denial and return the standard response shape."""
+    from agentpay.schemas.schemas import PolicyDecision
+
+    decision = PolicyDecision(Decision.DENY, detail, rule)
+    request = PaymentRequest(
+        agent_id=agent_id,
+        recipient=str(recipient),
+        amount=Decimal(0),
+        reason=reason,
+    )
+    audit.record(request, decision, now)
+    return {
+        "decision": "deny", "allowed": False, "rule": rule, "detail": detail,
+        "executed": False, "tx_hash": None, "error": None,
+    }

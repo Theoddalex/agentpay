@@ -5,3 +5,6 @@ __pycache__/
 wallet.key
 audit.db
 .pytest_cache/
+
+build/
+*.egg-info/

@@ -11,6 +11,7 @@ request object) can ask "who is calling?" regardless of transport:
 
 from __future__ import annotations
 
+import hmac
 from contextvars import ContextVar
 
 # Identity of the caller for the current request. Default for stdio/local use.
@@ -54,7 +55,7 @@ class AuthMiddleware:
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         auth = headers.get("authorization", "")
         token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
-        agent_id = self.api_keys.get(token)
+        agent_id = self._resolve(token)
 
         if agent_id is None:
             await send(
@@ -77,3 +78,17 @@ class AuthMiddleware:
 
         current_agent_id.set(agent_id)
         await self.app(scope, receive, send)
+
+    def _resolve(self, token: str) -> str | None:
+        """Return the agent_id for a token, comparing in constant time.
+
+        A plain dict lookup leaks key length/prefix via timing; compare_digest
+        against each known key does not. The key set is small, so O(n) is fine.
+        """
+        if not token:
+            return None
+        match = None
+        for key, agent_id in self.api_keys.items():
+            if hmac.compare_digest(key, token):
+                match = agent_id
+        return match
