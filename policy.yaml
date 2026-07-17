@@ -25,3 +25,9 @@ agents:
   procurement:
     per_transaction_max: 0.05
     daily_max: 0.20
+
+  # the shopping agent from the agent-shop example
+  shop-agent:
+    per_transaction_max: 0.01
+    daily_max: 0.03
+    approval_threshold: 0.008
