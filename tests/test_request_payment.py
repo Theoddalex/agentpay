@@ -187,7 +187,7 @@ def test_parallel_requests_cannot_bust_the_budget(tmp_path):
     allowed = results.count("allow")
     assert allowed <= 3, f"budget busted: {allowed} allowed (max 3)"
     # and the ledger agrees
-    total = sum(a for _, a, _ in audit.approved_spends("agent-1"))
+    total = sum(a for _, a, _, _ in audit.approved_spends("agent-1"))
     assert total <= __import__("decimal").Decimal("0.10")
 
 

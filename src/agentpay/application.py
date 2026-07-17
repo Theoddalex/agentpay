@@ -36,5 +36,6 @@ def create_application():
         audit,
         get_chain=get_chain,
         enable_sends=settings.enable_sends,
+        chain_id=settings.chain_id,
     )
     return mcp

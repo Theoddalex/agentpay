@@ -45,6 +45,7 @@ class AuditLog:
                     agent_id   TEXT    NOT NULL,
                     recipient  TEXT    NOT NULL,
                     amount     TEXT    NOT NULL,   -- Decimal as text: exact precision
+                    asset      TEXT    NOT NULL DEFAULT 'ETH',  -- ETH or token symbol
                     reason     TEXT,
                     decision   TEXT    NOT NULL,   -- allow / deny / needs_approval
                     rule       TEXT    NOT NULL,
@@ -55,6 +56,12 @@ class AuditLog:
                 )
                 """
             )
+            # Migrate pre-asset databases: add the column if an older file lacks it.
+            existing = {r[1] for r in self._conn.execute("PRAGMA table_info(audit)")}
+            if "asset" not in existing:
+                self._conn.execute(
+                    "ALTER TABLE audit ADD COLUMN asset TEXT NOT NULL DEFAULT 'ETH'"
+                )
             # budget queries filter by agent + recency; index makes them O(log n).
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_agent_ts ON audit (agent_id, ts)"
@@ -72,13 +79,15 @@ class AuditLog:
         """Insert an attempt and return its row id (used to stamp the outcome later)."""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO audit (ts, agent_id, recipient, amount, reason, decision, "
-                "rule, detail, status, tx_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit (ts, agent_id, recipient, amount, asset, reason, "
+                "decision, rule, detail, status, tx_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     now.isoformat(),
                     request.agent_id,
                     request.recipient,
                     str(request.amount),
+                    request.asset,
                     request.reason,
                     decision.decision.value,
                     decision.rule,
@@ -108,7 +117,7 @@ class AuditLog:
 
     def history(self, agent_id: str | None = None) -> list[dict]:
         """Return audit rows, optionally filtered to one agent, oldest first."""
-        cols = ["ts", "agent_id", "recipient", "amount", "decision", "rule",
+        cols = ["ts", "agent_id", "recipient", "amount", "asset", "decision", "rule",
                 "detail", "status", "tx_hash", "error"]
         select = f"SELECT {', '.join(cols)} FROM audit"
         with self._lock:
@@ -122,14 +131,15 @@ class AuditLog:
 
     def approved_spends(
         self, agent_id: str, since: datetime | None = None
-    ) -> list[tuple[str, Decimal, datetime]]:
-        """(recipient, amount, ts) for spends that count toward the budget.
+    ) -> list[tuple[str, Decimal, datetime, str]]:
+        """(recipient, amount, ts, asset) for spends that count toward the budget.
 
         Counts decision='allow' rows that did not fail — so needs_approval and
         failed sends are excluded. Optionally bounded to rows at/after `since`
-        (the caller passes now-24h; the widest policy window is daily).
+        (the caller passes now-24h; the widest policy window is daily). All
+        assets are returned; the policy engine splits the budget per asset.
         """
-        sql = ("SELECT recipient, amount, ts FROM audit "
+        sql = ("SELECT recipient, amount, ts, asset FROM audit "
                "WHERE agent_id = ? AND decision = 'allow' AND status != 'failed'")
         params: list = [agent_id]
         if since is not None:
@@ -137,4 +147,6 @@ class AuditLog:
             params.append(since.isoformat())
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [(r[0], Decimal(r[1]), datetime.fromisoformat(r[2])) for r in rows]
+        return [
+            (r[0], Decimal(r[1]), datetime.fromisoformat(r[2]), r[3]) for r in rows
+        ]

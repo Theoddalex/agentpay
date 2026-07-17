@@ -17,12 +17,22 @@ from decimal import Decimal
 import yaml
 
 from agentpay.schemas.schemas import (
+    AssetLimits,
     Decision,
     PaymentRequest,
     Policy,
     PolicyDecision,
     SpendRecord,
 )
+
+
+def _asset_limits_from_dict(raw: dict) -> AssetLimits:
+    return AssetLimits(
+        per_transaction_max=Decimal(str(raw["per_transaction_max"])),
+        daily_max=Decimal(str(raw["daily_max"])),
+        hourly_max=Decimal(str(raw["hourly_max"])),
+        approval_threshold=Decimal(str(raw["approval_threshold"])),
+    )
 
 
 def _policy_from_dict(raw: dict) -> Policy:
@@ -34,6 +44,10 @@ def _policy_from_dict(raw: dict) -> Policy:
         approval_threshold=Decimal(str(raw["approval_threshold"])),
         allowlist=[a.lower() for a in raw.get("allowlist", [])],
         denylist=[a.lower() for a in raw.get("denylist", [])],
+        assets={
+            symbol: _asset_limits_from_dict(limits)
+            for symbol, limits in (raw.get("assets") or {}).items()
+        },
     )
 
 
@@ -73,8 +87,15 @@ class PolicyStore:
         return cls(raw, {})  # flat legacy format
 
     def for_agent(self, agent_id: str) -> Policy:
+        override = self._agents.get(agent_id, {})
         merged = dict(self._default)
-        merged.update(self._agents.get(agent_id, {}))
+        merged.update(override)
+        # `assets` is a nested map — merge per-symbol so an agent can tighten one
+        # token's limits without dropping the others it inherits from default.
+        merged["assets"] = {
+            **(self._default.get("assets") or {}),
+            **(override.get("assets") or {}),
+        }
         return _policy_from_dict(merged)
 
 
@@ -97,6 +118,7 @@ class PolicyEngine:
         p = self.policy
         recipient = request.recipient.lower()
         amount = request.amount
+        asset = request.asset
 
         # 1. Denylist — absolute, overrides everything else.
         if recipient in p.denylist:
@@ -118,33 +140,52 @@ class PolicyEngine:
                 Decision.DENY, f"amount {amount} must be positive", "amount_positive"
             )
 
-        # 4. Per-transaction cap.
-        if amount > p.per_transaction_max:
+        # 4. Token allowlist — an asset is payable only if it has limits. The
+        #    assets map (plus native ETH) IS the allowlist; anything else is a
+        #    token the operator never authorised.
+        limits = p.limits_for(asset)
+        if limits is None:
             return PolicyDecision(
                 Decision.DENY,
-                f"amount {amount} exceeds per-transaction max {p.per_transaction_max}",
+                f"asset {asset} is not permitted by policy",
+                "asset_not_allowed",
+            )
+
+        # Budget caps compare like-for-like: only this asset's own history counts
+        # (50 USDC must never eat into an ETH ceiling, and vice versa).
+        asset_history = [r for r in history if r.asset == asset]
+
+        # 5. Per-transaction cap.
+        if amount > limits.per_transaction_max:
+            return PolicyDecision(
+                Decision.DENY,
+                f"amount {amount} {asset} exceeds per-transaction max "
+                f"{limits.per_transaction_max}",
                 "per_transaction_max",
             )
 
-        # 5. Rolling 1-hour spend cap.
-        hour_spent = self._spent_since(history, now - timedelta(hours=1))
-        if hour_spent + amount > p.hourly_max:
+        # 6. Rolling 1-hour spend cap.
+        hour_spent = self._spent_since(asset_history, now - timedelta(hours=1))
+        if hour_spent + amount > limits.hourly_max:
             return PolicyDecision(
                 Decision.DENY,
-                f"hourly spend {hour_spent}+{amount} would exceed {p.hourly_max}",
+                f"hourly {asset} spend {hour_spent}+{amount} would exceed "
+                f"{limits.hourly_max}",
                 "hourly_max",
             )
 
-        # 6. Rolling 24-hour spend cap.
-        day_spent = self._spent_since(history, now - timedelta(hours=24))
-        if day_spent + amount > p.daily_max:
+        # 7. Rolling 24-hour spend cap.
+        day_spent = self._spent_since(asset_history, now - timedelta(hours=24))
+        if day_spent + amount > limits.daily_max:
             return PolicyDecision(
                 Decision.DENY,
-                f"daily spend {day_spent}+{amount} would exceed {p.daily_max}",
+                f"daily {asset} spend {day_spent}+{amount} would exceed "
+                f"{limits.daily_max}",
                 "daily_max",
             )
 
-        # 7. Rate limit — count payments in the last 60 seconds.
+        # 8. Rate limit — count ALL payments in the last 60 seconds, any asset.
+        #    (A flood is a flood regardless of which token it moves.)
         recent = self._count_since(history, now - timedelta(seconds=60))
         if recent >= p.rate_limit_per_minute:
             return PolicyDecision(
@@ -154,16 +195,16 @@ class PolicyEngine:
                 "rate_limit_per_minute",
             )
 
-        # 8. Above the approval threshold → allowed, but a human must confirm.
-        if amount > p.approval_threshold:
+        # 9. Above the approval threshold → allowed, but a human must confirm.
+        if amount > limits.approval_threshold:
             return PolicyDecision(
                 Decision.NEEDS_APPROVAL,
-                f"amount {amount} exceeds approval threshold {p.approval_threshold}; "
-                "human confirmation required",
+                f"amount {amount} {asset} exceeds approval threshold "
+                f"{limits.approval_threshold}; human confirmation required",
                 "approval_threshold",
             )
 
-        # 9. All checks passed.
+        # 10. All checks passed.
         return PolicyDecision(Decision.ALLOW, "within policy", "ok")
 
     @staticmethod

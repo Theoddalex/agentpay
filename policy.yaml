@@ -1,18 +1,29 @@
 # agentpay spend policy — the guardrails agents CANNOT override.
-# Amounts are in ETH. Limits are config, not code.
+# The flat fields are limits for native ETH; `assets` holds per-token limits.
+# Amounts are in whole units of each asset (ETH, or 50 = 50 USDC). Config, not code.
 #
 # `default` applies to every agent; entries under `agents` override only the
 # fields they specify, keyed by the authenticated agent id (from the API key
 # over HTTP, or AGENT_ID for local stdio use).
+#
+# A token is payable ONLY if it has an `assets` entry — the map doubles as the
+# token allowlist. Its budget is tracked separately from ETH and every other
+# token (50 USDC never eats into an ETH ceiling).
 
 default:
-  per_transaction_max: 0.05    # reject any single payment larger than this
-  hourly_max: 0.10             # reject if rolling 1-hour spend would exceed this
-  daily_max: 0.20              # reject if rolling 24-hour spend would exceed this
-  rate_limit_per_minute: 5     # at most this many payments per 60s window
-  approval_threshold: 0.02     # above this, a human must approve
+  per_transaction_max: 0.05    # reject any single ETH payment larger than this
+  hourly_max: 0.10             # reject if rolling 1-hour ETH spend would exceed this
+  daily_max: 0.20              # reject if rolling 24-hour ETH spend would exceed this
+  rate_limit_per_minute: 5     # at most this many payments per 60s window (all assets)
+  approval_threshold: 0.02     # above this, a human must approve (ETH)
   allowlist: []                # if non-empty, ONLY these recipients (lowercase)
   denylist: []                 # never pay these, overrides everything
+  assets:
+    USDC:                      # amounts in whole USDC (the chain layer handles 6 decimals)
+      per_transaction_max: 25
+      hourly_max: 50
+      daily_max: 100
+      approval_threshold: 20
 
 agents:
   # a cautious identity: tiny budget, everything above 0.005 needs a human
@@ -20,6 +31,12 @@ agents:
     per_transaction_max: 0.01
     daily_max: 0.02
     approval_threshold: 0.005
+    assets:
+      USDC:
+        per_transaction_max: 5
+        hourly_max: 10
+        daily_max: 20
+        approval_threshold: 5
 
   # a trusted identity: bigger budget
   procurement:

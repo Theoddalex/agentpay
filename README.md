@@ -14,8 +14,8 @@ Think *corporate-card controls (Ramp/Brex) or Stripe Radar — but for agents.*
 ## How it works
 
 ```
-Agent: "pay 0.03 ETH to 0xabc… for the data API"
-        │  (MCP tool call: request_payment)
+Agent: "pay 50 USDC to 0xabc… for the data API"
+        │  (MCP tool call: request_payment, asset="USDC")
         ▼
    ┌───────────────────────────── agentpay ─────────────────────────────┐
    │  policy engine:  per-tx cap · hourly/daily budget · allow/deny      │
@@ -33,11 +33,16 @@ the same server.
 
 ## Design principles
 
-- **Non-custodial, testnet-first.** Defaults to Sepolia. Sends are OFF until you
-  explicitly enable them. Never put a mainnet key behind an autonomous agent.
+- **Non-custodial, testnet-first.** Defaults to Base Sepolia. Sends are OFF
+  until you explicitly enable them. Never put a mainnet key behind an autonomous
+  agent.
+- **ETH and stablecoins.** Native ETH plus ERC-20 tokens (USDC). Each asset has
+  its own policy limits and its own budget — 50 USDC never eats into an ETH
+  ceiling — and a token is payable only if the policy names it.
 - **The policy engine is pure logic** (`src/agentpay/services/policy.py`) — no
   I/O — so it is exhaustively unit-tested. The code guarding money is the code
-  under the most tests (46 across the engine, auth, audit, and payment flow).
+  under the most tests (60 across the engine, auth, audit, ERC-20, and payment
+  flow).
 - **Config, not code.** Limits live in `policy.yaml`.
 
 ## Layout
@@ -52,11 +57,12 @@ src/agentpay/
 │   ├── policy.py                # ⭐ the policy engine — pure, tested
 │   ├── audit.py                 # append-only SQLite audit log
 │   ├── auth.py                  # Bearer API-key auth + per-request identity
-│   ├── chain.py                 # web3.py wrapper (Sepolia)
+│   ├── chain.py                 # web3.py wrapper — ETH + ERC-20 (Base Sepolia)
+│   ├── tokens.py                # known-token registry (symbol → address/decimals)
 │   └── wallet.py                # throwaway testnet key
 ├── schemas/schemas.py           # contracts (Decimal money, dataclasses)
 └── configs/base.py              # pydantic settings
-tests/                           # 46 tests — policy, auth, audit, payment flow
+tests/                           # 60 tests — policy, auth, audit, ERC-20, payment flow
 examples/demo_agent.py           # a LangChain agent that uses the server
 ```
 
@@ -117,15 +123,16 @@ audit log — it only gets `request_payment` and a verdict.
 
 ## Status
 
-Working MVP: pure policy engine, per-agent policies, Bearer-key auth,
-append-only audit log, real Sepolia sends, stdio + hosted HTTP transports, and a
-LangChain demo agent. 46 tests.
+Working MVP: pure policy engine, per-agent policies, per-asset limits, Bearer-key
+auth, append-only audit log, real Base Sepolia sends of **ETH and USDC**, stdio +
+hosted HTTP transports, and a LangChain demo agent. 60 tests.
 
 ## Roadmap
 
-- **ERC-20 / stablecoin support (USDC).** Native ETH only today; stablecoins are
-  the real currency of agent payments. Adds token transfers + `approve()`
-  inspection (the vector behind most wallet drains).
+- **Guarded `approve()`.** Token *transfers* ship today; the next ERC-20 step is
+  a guarded `approve` that caps allowance to the exact amount and refuses
+  unlimited (`2^256-1`) approvals — the vector behind most wallet drains. (The
+  current transfer path grants no allowance, so it sidesteps this entirely.)
 - **Postgres audit backend.** Replaces the SQLite file — unlocks multi-replica
   deployment *and* cross-process budget atomicity (`SELECT … FOR UPDATE`),
   lifting the single-process limitation above. One swap, both wins.

@@ -12,9 +12,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # --- Ethereum (Sepolia testnet by default — NEVER default to mainnet) ---
-    rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
-    chain_id: int = 11155111  # Sepolia
+    # --- Ethereum (Base Sepolia testnet by default — NEVER default to mainnet) ---
+    # Base Sepolia is where most agent-payment / x402 / stablecoin activity lives,
+    # and Circle's testnet USDC has a faucet there. Native-ETH gas works too.
+    rpc_url: str = "https://sepolia.base.org"
+    chain_id: int = 84532  # Base Sepolia
     # Path to the agent's throwaway keystore. Testnet only.
     keystore_path: str = "wallet.key"
 
