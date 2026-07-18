@@ -7,94 +7,109 @@ without risking the wallet.**
 
 AI agents are probabilistic — they can be prompt-injected, loop, or simply
 choose the wrong tool. The moment an agent can move money, one bad decision is
-irreversible. `agentmandate` is the guardrail layer between an agent and an Ethereum
-wallet: every payment the agent requests is checked against a policy it **cannot
-override**, and every attempt is logged.
+irreversible. `agentmandate` is the guardrail layer between an agent and an
+Ethereum wallet: every payment the agent requests is checked against a policy
+it **cannot override**, and every attempt is logged.
 
-Think *corporate-card controls (Ramp/Brex) or Stripe Radar — but for agents.*
-
-## How it works
-
-```
-Agent: "pay 50 USDC to 0xabc… for the data API"
-        │  (MCP tool call: request_payment, asset="USDC")
-        ▼
-   ┌───────────────────────────── agentmandate ─────────────────────────────┐
-   │  policy engine:  per-tx cap · hourly/daily budget · allow/deny      │
-   │                  list · rate limit · human-approval threshold        │
-   └─────────────────────────────────────────────────────────────────────┘
-        │ ALLOW → sign & send (testnet)      │ DENY → block + log
-        │ NEEDS_APPROVAL → queue for human   ▼
-        ▼           │                  agent gets a clear reason
-   tx executes,     └─► operator approves → re-check limits → execute
-   logged                                   every attempt is audited
-```
-
-Payments can move **ETH or ERC-20 tokens (USDC)**, and agents can `request_payment`
-or `request_approval` (a guarded token allowance — capped to an exact amount,
-never unlimited). Granted allowances are tracked in an **allowance ledger**: they
-outlive budget windows, so the *total* an agent has live at once is capped too
-(`max_outstanding_allowance`), and `approve(spender, 0)` revokes to free the cap.
-A `needs_approval` verdict is no longer a dead end: it queues
-for a human operator, who approves or rejects it (`resolve_approval`) — and hard
-limits are re-checked at approval time, so a human "yes" can't bust a budget.
-
-The **MCP server is the product**; the LangChain agent in `examples/` is just
-one client. Any MCP-aware client (Claude Desktop, Cursor, another agent) can use
-the same server.
-
-## Design principles
-
-- **Non-custodial, testnet-first.** Defaults to Base Sepolia. Sends are OFF
-  until you explicitly enable them. Never put a mainnet key behind an autonomous
-  agent.
-- **ETH and stablecoins.** Native ETH plus ERC-20 tokens (USDC). Each asset has
-  its own policy limits and its own budget — 50 USDC never eats into an ETH
-  ceiling — and a token is payable only if the policy names it.
-- **The policy engine is pure logic** (`src/agentmandate/services/policy.py`) — no
-  I/O — so it is exhaustively unit-tested. The code guarding money is the code
-  under the most tests (103 across the engine, auth, audit, ERC-20, approvals,
-  the allowance ledger, and the payment flow).
-- **Config, not code.** Limits live in `policy.yaml`.
-
-## Layout
-
-```
-main.py                          # repo-root shim (python main.py)
-src/agentmandate/
-├── main.py                      # console entrypoint (`agentmandate`)
-├── application.py               # app factory: create_application()
-├── api/payments.py              # MCP tools (transport)
-├── services/
-│   ├── policy.py                # ⭐ the policy engine — pure, tested
-│   ├── audit.py                 # append-only SQLite audit log
-│   ├── auth.py                  # Bearer API-key auth + per-request identity
-│   ├── chain.py                 # web3.py wrapper — ETH + ERC-20 (Base Sepolia)
-│   ├── tokens.py                # known-token registry (symbol → address/decimals)
-│   └── wallet.py                # throwaway testnet key
-├── schemas/schemas.py           # contracts (Decimal money, dataclasses)
-└── configs/base.py              # pydantic settings
-tests/                           # 103 tests — policy, auth, audit, ERC-20, approvals, allowances
-examples/demo_agent.py           # a LangChain agent that uses the server
-```
+Think *corporate-card controls (Ramp/Brex) or Stripe Radar — but for agents*.
+The model in one line: **give your agent an allowance, not your keys.**
 
 ## Quick start
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[demo,dev]"
-cp .env.example .env
+pip install git+https://github.com/theoddalex/agentmandate.git
 
-pytest                 # prove the policy engine
-agentmandate               # run the MCP server (stdio)
-python examples/demo_agent.py   # watch an agent get allowed / blocked / gated
+agentmandate init     # the one setup ceremony:
+                      #   ✓ policy.yaml — your agent's limits (edit them)
+                      #   ✓ a dedicated wallet, generated locally from OS entropy
+                      #   → prints the address to fund
+agentmandate status   # balances, gas headroom, active limits, sends switch
 ```
+
+Then point any MCP client (Claude Desktop, Cursor, a LangChain agent — see
+`examples/`) at the server, and the agent gets `request_payment` and a verdict —
+nothing else:
+
+```json
+{"agentmandate": {"transport": "stdio", "command": "agentmandate"}}
+```
+
+Defaults are safe by construction: **Base Sepolia testnet, sends OFF** until you
+explicitly set `ENABLE_SENDS=true`. On testnets you may even skip `init` — a
+throwaway wallet auto-creates on first use. On **mainnet** chains agentmandate
+refuses to create a key silently: real-money wallets only come into existence
+when a human runs `init`.
+
+## The wallet model: a prepaid card
+
+The agent never gets your wallet. `init` generates a **fresh, dedicated wallet**
+for the agent; you fund it with only what the agent may spend, and top it up
+like a prepaid card. That makes the maximum possible loss the card balance —
+a physics-level cap that holds even if every software check failed. The policy
+engine is the soft limit; the balance is the hard one. Your real wallet
+(hardware, exchange, MetaMask) never touches agentmandate at all.
+
+## How it works
+
+```
+Agent: "pay 10 USDC to 0xabc… for the data API"
+        │  (MCP tool call: request_payment, asset="USDC")
+        ▼
+   ┌───────────────────────────── agentmandate ─────────────────────────────┐
+   │  policy engine:  per-tx cap · hourly/daily budget · allow/deny list  │
+   │                  · rate limit · human-approval threshold             │
+   └───────────────────────────────────────────────────────────────────────┘
+        │ ALLOW → preflight balances,        │ DENY → block + log
+        │   sign, broadcast, CONFIRM         ▼
+        │ NEEDS_APPROVAL → queue for human   agent gets a clear reason
+        ▼           │
+   tx mined and     └─► operator approves → limits re-checked → execute
+   audited                                   every attempt is audited
+```
+
+Payments move **stablecoins (USDC) or ETH**. Stablecoins are the spending
+lanes; in the default policy ETH is a **gas-only lane** with near-zero limits —
+any real ETH transfer attempt looks anomalous and gets denied or escalated.
+
+**The allowance ledger — the part nothing else has.** Agents can also
+`request_approval` (a guarded ERC-20 `approve()`): always an exact amount,
+never unlimited — the vector behind most token drains. Granted allowances
+outlive every budget window, so agentmandate tracks them as **standing
+liabilities**: the *total* live across all spenders is capped
+(`max_outstanding_allowance`), and `approve(spender, 0)` revokes to free the
+cap. Rolling budgets alone can't see this risk; the ledger closes it.
+
+A `needs_approval` verdict is not a dead end: it queues for a human operator,
+who approves or rejects (`resolve_approval`) — and hard limits are re-checked
+at approval time, so a human "yes" can't bust a budget.
+
+The **MCP server is the product**; agents are just clients of it.
+
+## Design principles
+
+- **Non-custodial, blast-radius first.** Dedicated per-agent wallet, funded
+  with pocket money. Keys are generated locally, never leave the machine, and
+  never get created as a side effect on mainnet.
+- **The RPC endpoint is untrusted.** Gas price is capped by a configurable
+  ceiling (`MAX_FEE_GWEI`) and gas limits are fixed, never estimated — a
+  lying RPC can neither overprice nor inflate a transaction. Worst-case gas
+  cost is bounded at `gas_limit × ceiling`, always.
+- **Broadcast is not success.** Every send waits for the receipt; reverts and
+  timeouts fail the audit row. "Executed" means *mined with status 1*.
+- **The policy engine is pure logic** (`src/agentmandate/services/policy.py`)
+  — no I/O — so it is exhaustively unit-tested. The code guarding money is the
+  code under the most tests (132 across the engine, auth, audit, ERC-20,
+  approvals, the allowance ledger, the chain rails, and the CLI).
+- **Config, not code.** Limits live in `policy.yaml`. Each asset has its own
+  limits and its own budget — 10 USDC never eats into an ETH ceiling — and a
+  token is payable only if the policy names it.
 
 ## Deploying it
 
 The wallet owner runs the server; agents connect as clients and set nothing.
 
-**Local (stdio)** — each MCP client spawns its own server process:
+**Local (stdio)** — each MCP client spawns its own server process; identity is
+`AGENT_ID`, the OS is the auth boundary:
 
 ```json
 {"agentmandate": {"transport": "stdio", "command": "agentmandate"}}
@@ -120,33 +135,84 @@ docker build -t agentmandate . && docker run -p 8000:8000 \
 
 The API key is the agent's identity: it selects that agent's policy section in
 `policy.yaml` and attributes its audit trail. The same request can be denied
-for `support-bot` (0.01/tx cap) and allowed for `procurement` (0.05/tx) —
-identity decides. Unauthenticated requests get a 401 before any tool runs.
+for `support-bot` and allowed for `procurement` — identity decides.
+Unauthenticated requests get a 401 before any tool runs.
 
-To use the approval-completion flow in hosted mode, also set
-`AGENTMANDATE_ADMIN_KEYS='sk-admin-…:ops'` — a human operator with an admin key can
-`list_pending_approvals` and `resolve_approval`; agents (regular keys) cannot,
-so no agent can sign off its own `needs_approval` payment. Over stdio the local
-operator is the admin automatically.
-
-Either way, the client's agent code never sees the policy, the keys, or the
-audit log — it only gets `request_payment` and a verdict.
+For the approval flow in hosted mode, also set
+`AGENTMANDATE_ADMIN_KEYS='sk-admin-…:ops'` — a human with an admin key can
+`list_pending_approvals` / `resolve_approval`; agents (regular keys) cannot, so
+no agent signs off its own payment. Over stdio the local operator is the admin.
 
 > **Hosted-mode operational notes.** Bearer keys travel in headers — terminate
-> TLS at your ingress/reverse proxy; never expose the plain HTTP port publicly.
-> The server is **single-process** today: the per-agent budget lock guarantees
-> no double-spend within one process, but running multiple workers/replicas
-> against one `audit.db` is not yet safe (needs DB-level locking). Run one
-> replica per wallet until then.
+> TLS at your ingress; never expose the plain HTTP port publicly. Keep API and
+> admin keys disjoint (the server refuses to start otherwise). The server is
+> **single-process** today: budget checks are atomic within one process, but
+> multiple workers/replicas against one `audit.db` are not yet safe. Run one
+> replica per wallet.
+
+## Going to mainnet
+
+**Base mainnet (chain 8453) is the recommended target** — Circle-native USDC
+and sub-cent gas. The sequence:
+
+```bash
+CHAIN_ID=8453 RPC_URL=https://mainnet.base.org agentmandate init
+```
+
+1. `init` prints the funding address. Send it a small USDC float and a few
+   dollars of ETH for gas — **withdraw on the Base network**, not Ethereum.
+2. Edit `policy.yaml` down to numbers you'd let an autonomous process spend.
+   Set the `allowlist` to known recipients.
+3. Check the card: `agentmandate status`.
+4. Flip `ENABLE_SENDS=true` **last**.
+
+Treat the wallet as a hot-wallet float (see limitations below): it should never
+hold more than you'd load onto a gift card.
+
+## Layout
+
+```
+main.py                          # repo-root shim (python main.py)
+src/agentmandate/
+├── main.py                      # console entrypoint (`agentmandate`)
+├── cli.py                       # operator CLI: init (the ceremony) + status
+├── application.py               # app factory: create_application()
+├── api/payments.py              # MCP tools (transport)
+├── services/
+│   ├── policy.py                # ⭐ the policy engine — pure, tested
+│   ├── audit.py                 # append-only SQLite audit log
+│   ├── auth.py                  # Bearer API-key auth + per-request identity
+│   ├── chain.py                 # web3 wrapper — gas rails, nonce lock, receipts
+│   ├── tokens.py                # known-token registry (symbol → address/decimals)
+│   └── wallet.py                # dedicated wallet: explicit create, mainnet guard
+├── schemas/schemas.py           # contracts (Decimal money, dataclasses)
+└── configs/base.py              # pydantic settings
+tests/                           # 132 tests
+examples/demo_agent.py           # a LangChain agent that uses the server
+```
+
+## Developing
+
+```bash
+git clone https://github.com/theoddalex/agentmandate && cd agentmandate
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[demo,dev]"
+cp .env.example .env
+
+pytest                           # 132 tests — the policy engine and the rails
+python examples/demo_agent.py    # watch an agent get allowed / blocked / gated
+```
 
 ## Status
 
-Working v1: pure policy engine, per-agent + per-asset policies, guarded token
-`approve()` with an **allowance ledger** (total live allowances capped as a
-standing liability, revoke supported), a human approval-completion flow
-(admin-gated, budget + ledger re-checked at approval time), Bearer-key auth,
-append-only audit log, structured logging, real Base Sepolia sends of **ETH and
-USDC**, stdio + hosted HTTP transports, and a LangChain demo agent. 103 tests.
+Working v1, mainnet-hardened chain layer: pure policy engine, per-agent +
+per-asset policies, guarded token `approve()` with the **allowance ledger**
+(total live allowances capped, revoke supported), human approval flow
+(admin-gated, re-checked at approval time), Bearer-key auth, append-only audit
+log, gas-fee ceiling + fixed gas limits (untrusted RPC), pending-nonce with a
+per-wallet lock, receipt-confirmed sends, balance preflight, `init`/`status`
+operator CLI, USDC on Base + Ethereum (mainnet and testnets), stdio + hosted
+HTTP transports, and a LangChain demo agent. 132 tests.
 
 ## Security checks
 
@@ -160,45 +226,49 @@ locally by `make security`:
 
 All findings gate at HIGH/CRITICAL. agentmandate deploys no custom smart
 contracts, so the risk surface is the application itself — these checks cover
-it; an external review is still the gate before real funds.
+it; an external review is still the gate before serious funds.
 
-## Known limitations (testnet-first — read before mainnet)
+## Known limitations (read before mainnet)
 
-These are deliberate boundaries of the current design, verified by a `/ship`
-review. None risks testnet funds; all are gated before real money.
+These are deliberate boundaries of the current design.
 
+- **The key file is unencrypted** (`wallet.key`, permissions 0600). This is the
+  prepaid-card trade-off: the wallet is designed to hold a small float, not
+  savings. Anyone with file access to the machine can take the float. An
+  encrypted keystore is on the roadmap; the mitigation today is the funding
+  model itself.
 - **The allowance ledger is conservative and off-chain.** It assumes the full
-  last-approved amount to each spender is still live (a spender may have already
-  pulled some — the real liability can only be *lower* than what we cap), and it
-  reconstructs the ledger from agentmandate's own audit log: allowances granted
-  outside agentmandate (or before it) are invisible to it. Start from a wallet with
-  no pre-existing approvals, or revoke them first. On-chain `allowance()`
-  reconciliation is on the roadmap.
+  last-approved amount to each spender is still live (the real liability can
+  only be *lower* than the cap), and it reconstructs state from agentmandate's
+  own audit log: allowances granted outside agentmandate are invisible to it.
+  Start from a wallet with no pre-existing approvals, or revoke them first.
 - **Rate limiting counts only allowed spends.** Denied and `needs_approval`
   attempts don't count toward `rate_limit_per_minute`, and the pending-approval
-  queue is unbounded/unpaginated — a looping agent can flood the audit log.
-- **Single wallet, single process.** All agents sign from one keystore; the
-  per-agent lock prevents double-spend within one process, but concurrent
-  in-flight txs can race on the nonce, and multiple workers/replicas against one
-  `audit.db` are not safe. Run one replica per wallet.
+  queue is unbounded — a looping agent can flood the audit log.
+- **Single wallet, single process.** All agents sign from one keystore. The
+  per-wallet nonce lock serialises concurrent sends within one process, but
+  multiple workers/replicas against one `audit.db` are not safe. Run one
+  replica per wallet.
 - **stdio makes the caller its own approver.** The "an agent can't approve its
   own payment" guarantee holds over HTTP (separate admin keys); over stdio the
   local operator is both. Hard limits are still re-checked at approval time.
-- **Address validation is hex-shape only** (no EIP-55 checksum) — a mistyped but
-  well-formed address will send. Use the allowlist for known recipients.
-
-> **Hosted-mode operational notes.** Bearer keys travel in headers — terminate
-> TLS at your ingress/reverse proxy; never expose the plain HTTP port publicly.
-> Keep `AGENTMANDATE_API_KEYS` and `AGENTMANDATE_ADMIN_KEYS` disjoint (the server refuses
-> to start otherwise). See the single-process limitation above.
+- **Address validation is hex-shape only** (no EIP-55 checksum) — a mistyped
+  but well-formed address will send. Use the allowlist for known recipients.
 
 ## Roadmap
 
 - **On-chain allowance reconciliation.** Cross-check the ledger against live
-  `allowance()` reads so spent-down grants free the cap, and pre-existing
-  out-of-band approvals are detected instead of invisible.
+  `allowance()` reads so spent-down grants free the cap, and out-of-band
+  approvals are detected instead of invisible.
+- **Encrypted keystore.** Password-protected key at rest (eth_account native),
+  unlocked via env at startup.
 - **Postgres audit backend.** Replaces the SQLite file — unlocks multi-replica
-  deployment *and* cross-process budget atomicity (`SELECT … FOR UPDATE`),
-  lifting the single-process limitation above. One swap, both wins.
+  deployment *and* cross-process budget atomicity, lifting the single-process
+  limitation. One swap, both wins.
 - **Abuse limits.** Count all attempts toward the rate limit; bound, paginate,
   and expire the pending-approval queue; retain/rotate the audit log.
+- **Non-custodial hosted control plane.** Split verdict from signing so a
+  hosted agentmandate never holds customer keys: policy + audit + dashboard in
+  the cloud, a client-side signer executing only server-issued, single-use
+  vouchers — and, longer term, ERC-4337 session keys / spend permissions so the
+  chain itself enforces the limits.
