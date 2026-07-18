@@ -1,10 +1,10 @@
-"""Console entrypoint — `agentpay` on the command line (or `uvx agentpay`).
+"""Console entrypoint — `agentmandate` on the command line (or `uvx agentmandate`).
 
 Transport comes from settings/.env:
   TRANSPORT=stdio            local: each MCP client spawns its own server;
                              the OS is the auth boundary, identity = AGENT_ID
   TRANSPORT=streamable-http  hosted: one server at http://HOST:PORT/mcp.
-                             Requires AGENTPAY_API_KEYS ("key:agent-id,...");
+                             Requires AGENTMANDATE_API_KEYS ("key:agent-id,...");
                              refuses to start without them unless
                              ALLOW_ANONYMOUS=true is set explicitly.
 """
@@ -12,9 +12,9 @@ Transport comes from settings/.env:
 import logging
 import sys
 
-from agentpay.application import create_application
-from agentpay.configs.base import settings
-from agentpay.services.auth import (
+from agentmandate.application import create_application
+from agentmandate.configs.base import settings
+from agentmandate.services.auth import (
     AuthMiddleware,
     current_agent_id,
     current_is_admin,
@@ -24,7 +24,7 @@ from agentpay.services.auth import (
 
 def main() -> None:
     # Logs go to STDERR — stdout is the MCP protocol channel over stdio, so
-    # writing logs there would corrupt it. This lights up the agentpay.* loggers.
+    # writing logs there would corrupt it. This lights up the agentmandate.* loggers.
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stderr,
@@ -42,22 +42,22 @@ def main() -> None:
         return
 
     # --- hosted mode ---
-    api_keys = parse_api_keys(settings.agentpay_api_keys)
-    admin_keys = parse_api_keys(settings.agentpay_admin_keys)
+    api_keys = parse_api_keys(settings.agentmandate_api_keys)
+    admin_keys = parse_api_keys(settings.agentmandate_admin_keys)
 
     overlap = set(api_keys) & set(admin_keys)
     if overlap:
         sys.exit(
-            "agentpay: the same key appears in both AGENTPAY_API_KEYS and "
-            "AGENTPAY_ADMIN_KEYS. Keys must be disjoint — a shared key resolves to "
+            "agentmandate: the same key appears in both AGENTMANDATE_API_KEYS and "
+            "AGENTMANDATE_ADMIN_KEYS. Keys must be disjoint — a shared key resolves to "
             "the non-admin agent identity, silently stripping approval rights. "
             "Give operators their own keys."
         )
     if not api_keys and not settings.allow_anonymous:
         sys.exit(
-            "agentpay: refusing to serve HTTP without authentication.\n"
+            "agentmandate: refusing to serve HTTP without authentication.\n"
             "This server fronts a wallet — an open endpoint means anyone who can\n"
-            "reach it can spend the budget. Set AGENTPAY_API_KEYS='<key>:<agent-id>,...'\n"
+            "reach it can spend the budget. Set AGENTMANDATE_API_KEYS='<key>:<agent-id>,...'\n"
             "or, for local experiments only, ALLOW_ANONYMOUS=true."
         )
 

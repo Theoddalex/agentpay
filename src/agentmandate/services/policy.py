@@ -1,4 +1,4 @@
-"""The policy engine — the core of agentpay.
+"""The policy engine — the core of agentmandate.
 
 This is deliberately PURE: it has no knowledge of web3, MCP, files, or the
 network. It takes (a request, the spend history, the current time) and returns
@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import yaml
 
-from agentpay.schemas.schemas import (
+from agentmandate.schemas.schemas import (
     AllowanceRecord,
     AssetLimits,
     Decision,

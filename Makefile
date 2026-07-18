@@ -23,8 +23,8 @@ trivy:
 
 ## The shippable artifact itself (base image + installed packages).
 audit-image:
-	docker build -q -t agentpay:audit .
-	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 agentpay:audit
+	docker build -q -t agentmandate:audit .
+	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 agentmandate:audit
 
 security: bandit trivy
 	@echo "security checks passed"

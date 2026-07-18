@@ -6,8 +6,8 @@ from decimal import Decimal
 
 import pytest
 
-from agentpay.services.auth import parse_api_keys
-from agentpay.services.policy import PolicyStore
+from agentmandate.services.auth import parse_api_keys
+from agentmandate.services.policy import PolicyStore
 
 
 # ---- API key parsing -----------------------------------------------------------

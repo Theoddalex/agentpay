@@ -21,8 +21,8 @@ from decimal import Decimal
 
 import pytest
 
-from agentpay.api.payments import register_payment_tools
-from agentpay.schemas.schemas import (
+from agentmandate.api.payments import register_payment_tools
+from agentmandate.schemas.schemas import (
     AllowanceRecord,
     AssetLimits,
     Decision,
@@ -30,9 +30,9 @@ from agentpay.schemas.schemas import (
     Policy,
     PolicyDecision,
 )
-from agentpay.services.audit import AuditLog
-from agentpay.services.auth import current_agent_id, current_is_admin
-from agentpay.services.policy import PolicyEngine, PolicyStore, _policy_from_dict
+from agentmandate.services.audit import AuditLog
+from agentmandate.services.auth import current_agent_id, current_is_admin
+from agentmandate.services.policy import PolicyEngine, PolicyStore, _policy_from_dict
 
 NOW = datetime(2026, 7, 17, 12, 0, 0)
 SPENDER_X = "0xCCCC000000000000000000000000000000000003"

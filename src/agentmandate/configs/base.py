@@ -41,11 +41,11 @@ class Settings(BaseSettings):
     # HTTP: "key1:agent-a,key2:agent-b" — every request must present one of
     # these as a Bearer token. Empty + HTTP transport = server refuses to start
     # (set allow_anonymous=true to override, e.g. for local experiments).
-    agentpay_api_keys: str = ""
+    agentmandate_api_keys: str = ""
     # HTTP: admin keys, same "key:admin-id,..." format. Admins (human operators,
     # never agents) may resolve needs_approval payments; agents cannot approve
     # their own. Optional — omit if you don't use the approval-completion flow.
-    agentpay_admin_keys: str = ""
+    agentmandate_admin_keys: str = ""
     allow_anonymous: bool = False
     # stdio: the identity of the local caller (the OS is the auth boundary).
     agent_id: str = "local"

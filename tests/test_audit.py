@@ -7,8 +7,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from agentpay.schemas.schemas import Decision, PaymentRequest, PolicyDecision
-from agentpay.services.audit import AuditLog
+from agentmandate.schemas.schemas import Decision, PaymentRequest, PolicyDecision
+from agentmandate.services.audit import AuditLog
 
 ALLOW = PolicyDecision(Decision.ALLOW, "within policy", "ok")
 DENY = PolicyDecision(Decision.DENY, "nope", "per_transaction_max")

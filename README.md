@@ -1,13 +1,13 @@
-# agentpay
+# agentmandate
 
-[![ci](https://github.com/theoddalex/agentpay/actions/workflows/ci.yml/badge.svg)](https://github.com/theoddalex/agentpay/actions/workflows/ci.yml)
+[![ci](https://github.com/theoddalex/agentmandate/actions/workflows/ci.yml/badge.svg)](https://github.com/theoddalex/agentmandate/actions/workflows/ci.yml)
 
 **Programmable spend limits and audit trails so AI agents can pay for things
 without risking the wallet.**
 
 AI agents are probabilistic — they can be prompt-injected, loop, or simply
 choose the wrong tool. The moment an agent can move money, one bad decision is
-irreversible. `agentpay` is the guardrail layer between an agent and an Ethereum
+irreversible. `agentmandate` is the guardrail layer between an agent and an Ethereum
 wallet: every payment the agent requests is checked against a policy it **cannot
 override**, and every attempt is logged.
 
@@ -19,7 +19,7 @@ Think *corporate-card controls (Ramp/Brex) or Stripe Radar — but for agents.*
 Agent: "pay 50 USDC to 0xabc… for the data API"
         │  (MCP tool call: request_payment, asset="USDC")
         ▼
-   ┌───────────────────────────── agentpay ─────────────────────────────┐
+   ┌───────────────────────────── agentmandate ─────────────────────────────┐
    │  policy engine:  per-tx cap · hourly/daily budget · allow/deny      │
    │                  list · rate limit · human-approval threshold        │
    └─────────────────────────────────────────────────────────────────────┘
@@ -51,7 +51,7 @@ the same server.
 - **ETH and stablecoins.** Native ETH plus ERC-20 tokens (USDC). Each asset has
   its own policy limits and its own budget — 50 USDC never eats into an ETH
   ceiling — and a token is payable only if the policy names it.
-- **The policy engine is pure logic** (`src/agentpay/services/policy.py`) — no
+- **The policy engine is pure logic** (`src/agentmandate/services/policy.py`) — no
   I/O — so it is exhaustively unit-tested. The code guarding money is the code
   under the most tests (103 across the engine, auth, audit, ERC-20, approvals,
   the allowance ledger, and the payment flow).
@@ -61,8 +61,8 @@ the same server.
 
 ```
 main.py                          # repo-root shim (python main.py)
-src/agentpay/
-├── main.py                      # console entrypoint (`agentpay`)
+src/agentmandate/
+├── main.py                      # console entrypoint (`agentmandate`)
 ├── application.py               # app factory: create_application()
 ├── api/payments.py              # MCP tools (transport)
 ├── services/
@@ -86,7 +86,7 @@ pip install -e ".[demo,dev]"
 cp .env.example .env
 
 pytest                 # prove the policy engine
-agentpay               # run the MCP server (stdio)
+agentmandate               # run the MCP server (stdio)
 python examples/demo_agent.py   # watch an agent get allowed / blocked / gated
 ```
 
@@ -97,7 +97,7 @@ The wallet owner runs the server; agents connect as clients and set nothing.
 **Local (stdio)** — each MCP client spawns its own server process:
 
 ```json
-{"agentpay": {"transport": "stdio", "command": "agentpay"}}
+{"agentmandate": {"transport": "stdio", "command": "agentmandate"}}
 ```
 
 **Hosted (HTTP)** — one server for the whole org; developers get a URL and an
@@ -106,14 +106,14 @@ mean anyone who can reach it can spend the budget):
 
 ```bash
 TRANSPORT=streamable-http \
-AGENTPAY_API_KEYS='sk-supp-…:support-bot,sk-proc-…:procurement' agentpay
+AGENTMANDATE_API_KEYS='sk-supp-…:support-bot,sk-proc-…:procurement' agentmandate
 # or
-docker build -t agentpay . && docker run -p 8000:8000 \
-  -e AGENTPAY_API_KEYS='…' -v $(pwd)/policy.yaml:/app/policy.yaml agentpay
+docker build -t agentmandate . && docker run -p 8000:8000 \
+  -e AGENTMANDATE_API_KEYS='…' -v $(pwd)/policy.yaml:/app/policy.yaml agentmandate
 ```
 
 ```json
-{"agentpay": {"transport": "streamable_http",
+{"agentmandate": {"transport": "streamable_http",
               "url": "http://payments.internal:8000/mcp",
               "headers": {"Authorization": "Bearer sk-supp-…"}}}
 ```
@@ -124,7 +124,7 @@ for `support-bot` (0.01/tx cap) and allowed for `procurement` (0.05/tx) —
 identity decides. Unauthenticated requests get a 401 before any tool runs.
 
 To use the approval-completion flow in hosted mode, also set
-`AGENTPAY_ADMIN_KEYS='sk-admin-…:ops'` — a human operator with an admin key can
+`AGENTMANDATE_ADMIN_KEYS='sk-admin-…:ops'` — a human operator with an admin key can
 `list_pending_approvals` and `resolve_approval`; agents (regular keys) cannot,
 so no agent can sign off its own `needs_approval` payment. Over stdio the local
 operator is the admin automatically.
@@ -158,7 +158,7 @@ locally by `make security`:
   API key in a commit fails the build), Dockerfile misconfig, and the built
   image (base OS + installed packages)
 
-All findings gate at HIGH/CRITICAL. agentpay deploys no custom smart
+All findings gate at HIGH/CRITICAL. agentmandate deploys no custom smart
 contracts, so the risk surface is the application itself — these checks cover
 it; an external review is still the gate before real funds.
 
@@ -170,8 +170,8 @@ review. None risks testnet funds; all are gated before real money.
 - **The allowance ledger is conservative and off-chain.** It assumes the full
   last-approved amount to each spender is still live (a spender may have already
   pulled some — the real liability can only be *lower* than what we cap), and it
-  reconstructs the ledger from agentpay's own audit log: allowances granted
-  outside agentpay (or before it) are invisible to it. Start from a wallet with
+  reconstructs the ledger from agentmandate's own audit log: allowances granted
+  outside agentmandate (or before it) are invisible to it. Start from a wallet with
   no pre-existing approvals, or revoke them first. On-chain `allowance()`
   reconciliation is on the roadmap.
 - **Rate limiting counts only allowed spends.** Denied and `needs_approval`
@@ -189,7 +189,7 @@ review. None risks testnet funds; all are gated before real money.
 
 > **Hosted-mode operational notes.** Bearer keys travel in headers — terminate
 > TLS at your ingress/reverse proxy; never expose the plain HTTP port publicly.
-> Keep `AGENTPAY_API_KEYS` and `AGENTPAY_ADMIN_KEYS` disjoint (the server refuses
+> Keep `AGENTMANDATE_API_KEYS` and `AGENTMANDATE_ADMIN_KEYS` disjoint (the server refuses
 > to start otherwise). See the single-process limitation above.
 
 ## Roadmap

@@ -29,7 +29,7 @@ import threading
 from datetime import datetime
 from decimal import Decimal
 
-from agentpay.schemas.schemas import PaymentRequest, PolicyDecision
+from agentmandate.schemas.schemas import PaymentRequest, PolicyDecision
 
 
 class AuditLog:

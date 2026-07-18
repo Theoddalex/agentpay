@@ -1,4 +1,4 @@
-# agentpay spend policy — the guardrails agents CANNOT override.
+# agentmandate spend policy — the guardrails agents CANNOT override.
 # The flat fields are limits for native ETH; `assets` holds per-token limits.
 # Amounts are in whole units of each asset (ETH, or 50 = 50 USDC). Config, not code.
 #
