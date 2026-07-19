@@ -23,7 +23,7 @@ The model in one line: **give your agent an allowance, not your keys.**
 ## Quick start
 
 ```bash
-pip install git+https://github.com/theoddalex/imprest.git
+pip install imprest
 
 imprest init     # the one setup ceremony:
                       #   ✓ policy.yaml — your agent's limits (edit them)
